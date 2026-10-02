@@ -48,8 +48,8 @@ fun AppNavigation(
         when (route) {
             is AppRoute.Bookshelf -> {
                 BookshelfScreen(
-                    onBookClick = { bookItem ->
-                        currentRoute = AppRoute.Reader(bookId = bookItem.book.id)
+                    onOpenBook = { bookId ->
+                        currentRoute = AppRoute.Reader(bookId = bookId)
                     }
                 )
             }

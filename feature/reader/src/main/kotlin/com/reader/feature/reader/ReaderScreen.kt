@@ -201,14 +201,14 @@ fun ReaderScreenContent(
                 ) {
                     if (uiState.isLoading) {
                         ReaderLoadingIndicator(
-                            text = "正在排版载入...",
+                            message = "正在排版载入...",
                             modifier = Modifier.fillMaxSize()
                         )
                     } else if (uiState.book == null && uiState.errorMessage != null) {
                         ReaderErrorStateView(
                             title = "加载书籍失败",
-                            description = uiState.errorMessage,
-                            onRetryClick = {
+                            errorMessage = uiState.errorMessage,
+                            onRetry = {
                                 onIntent(ReaderIntent.LoadBook(1L))
                             },
                             modifier = Modifier.fillMaxSize()

@@ -119,7 +119,7 @@ fun Modifier.readerTapGesture(
     onToggleMenu: () -> Unit
 ): Modifier = this.pointerInput(Unit) {
     detectTapGestures { offset ->
-        when (ReaderTapAction.resolve(offset, size = Size(size.width.toFloat(), size.height.toFloat()))) {
+        when (ReaderTapAction.resolve(offset, containerSize = Size(size.width.toFloat(), size.height.toFloat()))) {
             ReaderTapAction.PREVIOUS_PAGE -> onPreviousPage()
             ReaderTapAction.NEXT_PAGE -> onNextPage()
             ReaderTapAction.TOGGLE_MENU -> onToggleMenu()

@@ -3,10 +3,11 @@ package com.reader.app.bridge
 import com.reader.core.model.Book
 import com.reader.core.model.BookFormat
 import com.reader.core.model.Chapter
-import com.reader.core.model.ReadLocator
 import com.reader.core.model.ReaderConfig
 import com.reader.engine.parser.epub.EpubBookParser
 import com.reader.engine.parser.txt.TxtBookParser
+import com.reader.engine.typography.layout.TextMeasureEngine
+import com.reader.engine.typography.measurer.StandardCharMeasurer
 import com.reader.engine.typography.model.PageDimensions
 import com.reader.engine.typography.model.ReaderPage
 import com.reader.engine.typography.splitter.PageSplitter
@@ -32,31 +33,31 @@ class BookReadingBridge(
     ): BookParseResult = withContext(Dispatchers.IO) {
         when (format) {
             BookFormat.TXT -> {
-                val charset = txtParser.detectCharset(file).detectedCharset
-                val chapters = txtParser.parseChapters(file, charset)
+                val detection = txtParser.detectCharset(file)
+                val chapters = txtParser.parseChapters(file, charset = detection.charset)
                 BookParseResult(
                     title = file.nameWithoutExtension,
                     author = "本地文本",
                     format = format,
-                    charset = charset.name(),
+                    charset = detection.charset.name(),
                     chapters = chapters
                 )
             }
             BookFormat.EPUB -> {
                 val epubBook = epubParser.parse(file)
-                val book = epubParser.toBook(epubBook, file.absolutePath)
-                val chapters = epubParser.toChapters(epubBook, book.id)
+                val book = epubParser.toBook(epubBook, file)
+                val chapters = epubParser.toChapters(epubBook, archive = null, bookId = book.id)
+                val coverBytes = epubParser.extractCover(file)
                 BookParseResult(
                     title = book.title,
                     author = book.author,
                     format = format,
                     charset = "UTF-8",
                     chapters = chapters,
-                    coverData = epubParser.extractCoverImage(epubBook)
+                    coverData = coverBytes
                 )
             }
             else -> {
-                // MOBI / PDF 预留扩展，退化为单章处理
                 BookParseResult(
                     title = file.nameWithoutExtension,
                     author = "未知作者",
@@ -95,22 +96,21 @@ class BookReadingBridge(
                 content.paragraphs.joinToString("\n\n")
             }
             BookFormat.EPUB -> {
-                val epubBook = epubParser.parse(file)
-                val content = epubParser.extractChapterContent(epubBook, chapter.index)
-                content.paragraphs.joinToString("\n\n")
+                val contentPath = chapter.contentPath ?: "content.xhtml"
+                val chapterContent = epubParser.parseChapter(file, contentPath, chapter.title)
+                chapterContent.plainText
             }
             else -> "格式暂不支持排版"
         }
 
         // 使用自研中文避头尾法则与网格对齐引擎进行精确物理分页
-        val pages = PageSplitter.split(
+        val measurer = StandardCharMeasurer(fontSize = config.fontSizeSp)
+        val measureEngine = TextMeasureEngine(measurer = measurer, config = config)
+        val splitter = PageSplitter(measureEngine)
+        val pages = splitter.splitChapter(
             text = chapterText,
             dimensions = dimensions,
-            fontSizeSp = config.fontSizeSp,
-            lineHeightMultiplier = config.lineHeightMultiplier,
-            letterSpacing = config.letterSpacingEm,
-            paragraphSpacing = config.paragraphSpacingDp,
-            firstLineIndentSpaces = config.firstLineIndentSpaces
+            chapterIndex = chapter.index
         )
 
         ChapterPaginationResult(

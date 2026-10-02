@@ -21,7 +21,7 @@ class ReaderApplication : Application() {
         instance = this
 
         // 初始化离线 SQLite 数据库
-        database = ReaderDatabase.getInstance(this)
+        database = ReaderDatabase.build(this)
 
         // 初始化用户排版与主题偏好存储
         preferencesDataStore = ReaderPreferencesDataStore(this)
