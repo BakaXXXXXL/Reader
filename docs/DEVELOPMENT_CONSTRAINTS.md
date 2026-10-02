@@ -9,6 +9,10 @@
 1. **一主多从扁平层级结构**：
    - 整个工程仅保持 **“一个总指挥 (Team Lead) + 下属各板块专职执行者 (Teammates)”** 的扁平二级结构；
    - **绝对禁止子代理再次分发 (Strictly Prohibit Sub-delegation)**：任何子执行者（Teammate）**严禁**再次孵化、派生或分发新的子代理，必须直接自主完成分管板块的具体编码与测试工作，并统一向总指挥汇报。
+   - **智能体模型选型约束**：分发子代理时，必须且只可以使用以下指定模型：
+     1. `minimax-cn` 提供的 `MiniMax-M3.1-Flash-Preview`；
+     2. `Antigravity` 提供的 `Gemini3.8Flash` (`gemini-3.8-flash-tiered`，即当前会话模型)。
+     严禁调用或指定未经许可的其他模型。
 2. **全方位代码审查机制 (Comprehensive Review Protocol)**：
    - 每个板块任务在标记完成前，必须由总指挥执行**全方位严格审查 (Full-Scope Review)**：
      - **架构契约审查**：是否严格遵守 Clean Architecture 依赖单向流动，无跨层反向依赖，无越界引用；
