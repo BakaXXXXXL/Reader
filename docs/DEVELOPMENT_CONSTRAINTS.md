@@ -21,7 +21,22 @@
 
 ---
 
-## 二、产品定位与法律合规铁律 (Absolute Legal & Scope Boundary)
+## 二、用户决策确立的核心技术基准 (Decided Architectural Baselines)
+
+1. **默认翻页模式**：
+   - 出厂默认交互必须为：**平滑横向覆盖 (Cover / Slide)**；
+   - 必须同时保留并在排版设置中提供：拟真 3D 仿真翻页 (Simulation Curl)、连续垂直滚动 (Vertical Scroll) 以及无动画模式切换。
+2. **核心格式优先级**：
+   - 现阶段以 **TXT + EPUB 2/3 (小说图文流式)** 为最高优先级做深做透；
+   - 随后的迭代再扩展 MOBI/AZW3 与 PDF 模块。
+3. **EPUB 排版渲染策略**：
+   - 采用 **智能双模式**：
+     - 常规小说类 EPUB 默认走 **自研 Native Canvas 排版引擎**（享受极速翻页、内存极低、与 TXT 一致的统一手感与主题定制）；
+     - 遇到复杂 CSS/数学公式/富交互版式时，提供一键切换至 **高保真 Web 渲染器** 的双模兼容能力。
+
+---
+
+## 三、产品定位与法律合规铁律 (Absolute Legal & Scope Boundary)
 
 1. **纯本地离线定位**：
    - 本项目定位于**纯本地离线全格式电子书/小说阅读器**（支持 TXT, EPUB 2/3, MOBI, AZW/AZW3, PDF 等标准离线文件）。

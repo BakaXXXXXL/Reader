@@ -153,7 +153,7 @@ data class ReaderConfig(
     val pagePaddingHorizontalDp: Float = 16f,
     val pagePaddingVerticalDp: Float = 24f,
     val customFontPath: String? = null,       // 用户外挂字体路径
-    val pageTurnAnimation: PageTurnAnimation = PageTurnAnimation.SIMULATION, // 仿真, 覆盖, 平移, 滚动, 无
+    val pageTurnAnimation: PageTurnAnimation = PageTurnAnimation.COVER, // 默认平滑横向覆盖，可选仿真、平移、垂直滚动、无
     val themePreset: ReaderThemePreset = ReaderThemePreset.DEFAULT_LIGHT,
     val keepScreenOn: Boolean = true,
     val volumeKeyPageTurn: Boolean = true     // 音量键翻页
