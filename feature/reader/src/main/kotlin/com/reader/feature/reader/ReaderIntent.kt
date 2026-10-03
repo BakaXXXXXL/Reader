@@ -98,6 +98,9 @@ sealed interface ReaderIntent {
     /** 跳转至书签所记录的位置 */
     data class JumpToBookmark(val bookmark: Bookmark) : ReaderIntent
 
+    /** 更新视口物理尺寸并自适应重新排版分页 */
+    data class UpdateViewport(val width: Float, val height: Float) : ReaderIntent
+
     /** 清理当前错误提示 */
     data object ClearError : ReaderIntent
 }

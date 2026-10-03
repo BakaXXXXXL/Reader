@@ -30,6 +30,12 @@ android {
 
 dependencies {
     implementation(project(":core:model"))
+    implementation(project(":core:common"))
+    implementation(project(":core:database"))
+    implementation(project(":core:datastore"))
+    implementation(project(":core:designsystem"))
+    implementation(project(":engine:parser:txt"))
+    implementation(project(":engine:parser:epub"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
     implementation(composeBom)

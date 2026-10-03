@@ -8,6 +8,12 @@ import com.reader.core.model.PageTurnAnimation
 import com.reader.core.model.ReadLocator
 import com.reader.core.model.ReaderConfig
 import com.reader.core.model.ReaderThemePreset
+import com.reader.engine.typography.layout.TextMeasureEngine
+import com.reader.engine.typography.locator.ReadLocatorMapper
+import com.reader.engine.typography.measurer.StandardCharMeasurer
+import com.reader.engine.typography.model.PageDimensions
+import com.reader.engine.typography.model.ReaderPage
+import com.reader.engine.typography.splitter.PageSplitter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,7 +24,8 @@ import kotlinx.coroutines.launch
  * 阅读器核心状态机 ViewModel (MVI 架构)。
  *
  * 严格遵从单向数据流原则：通过 [sendIntent] 接收用户交互事件，
- * 在后台驱动状态机流转，并统一向表现层 Composable 单向暴露不可变 [uiState]。
+ * 在后台驱动状态机流转，结合 [PageSplitter] 物理分页算法与自适应定位恢复，
+ * 并统一向表现层 Composable 单向暴露不可变 [uiState]。
  *
  * @param dataSource 阅读器领域数据源接口，解耦数据库持久化与 UI
  * @param defaultBookId 初始默认加载的书籍 ID
@@ -30,6 +37,17 @@ open class ReaderViewModel(
 
     private val _uiState = MutableStateFlow(ReaderUiState(isLoading = true))
     val uiState: StateFlow<ReaderUiState> = _uiState.asStateFlow()
+
+    private var currentChapterText: String = ""
+    private var currentPages: List<ReaderPage> = emptyList()
+    private var currentDimensions: PageDimensions = PageDimensions(
+        viewWidth = 1080f,
+        viewHeight = 2200f,
+        paddingLeft = 48f,
+        paddingTop = 80f,
+        paddingRight = 48f,
+        paddingBottom = 80f
+    )
 
     init {
         sendIntent(ReaderIntent.LoadBook(defaultBookId))
@@ -69,6 +87,7 @@ open class ReaderViewModel(
                 is ReaderIntent.ToggleBookmark -> handleToggleBookmark()
                 is ReaderIntent.DeleteBookmark -> handleDeleteBookmark(intent.bookmarkId)
                 is ReaderIntent.JumpToBookmark -> handleJumpToBookmark(intent.bookmark)
+                is ReaderIntent.UpdateViewport -> handleUpdateViewport(intent.width, intent.height)
                 is ReaderIntent.ClearError -> handleClearError()
             }
         }
@@ -83,7 +102,7 @@ open class ReaderViewModel(
             val config = dataSource.getReaderConfig()
             val bookmarks = dataSource.getBookmarks(bookId)
 
-            val currentChapterIndex = savedLocator?.chapterIndex ?: 0
+            val currentChapterIndex = (savedLocator?.chapterIndex ?: 0).coerceIn(0, (chapters.size - 1).coerceAtLeast(0))
             val currentChapter = chapters.getOrNull(currentChapterIndex)
                 ?: chapters.firstOrNull()
 
@@ -91,51 +110,24 @@ open class ReaderViewModel(
                 dataSource.getChapterContent(bookId, currentChapter.index)
             } else ""
 
-            val totalPagesInChapter = calculatePagesForChapter(content)
-            val pageIndex = (savedLocator?.pageIndexInChapter ?: 0)
-                .coerceIn(0, (totalPagesInChapter - 1).coerceAtLeast(0))
-
-            val totalProgress = calculateTotalProgress(
-                chapterIndex = currentChapter?.index ?: 0,
-                totalChapters = chapters.size,
-                pageIndex = pageIndex,
-                totalPagesInChapter = totalPagesInChapter
-            )
-            val chapterProgress = calculateChapterProgress(pageIndex, totalPagesInChapter)
-
-            val isBookmarked = checkIsBookmarked(
-                bookmarks = bookmarks,
-                chapterIndex = currentChapter?.index ?: 0,
-                pageIndex = pageIndex
-            )
-
-            val locator = ReadLocator(
-                bookId = bookId,
-                chapterIndex = currentChapter?.index ?: 0,
-                chapterTitle = currentChapter?.title ?: "",
-                charOffset = pageIndex * 200,
-                progression = totalProgress,
-                pageIndexInChapter = pageIndex,
-                totalPagesInChapter = totalPagesInChapter
-            )
+            currentChapterText = content
+            val targetPageIndex = savedLocator?.pageIndexInChapter ?: 0
 
             _uiState.update {
                 it.copy(
-                    isLoading = false,
                     book = book,
-                    currentChapter = currentChapter,
                     chapters = chapters,
-                    currentLocator = locator,
-                    currentPageIndex = pageIndex,
-                    totalPagesInChapter = totalPagesInChapter,
-                    totalProgress = totalProgress,
-                    chapterProgress = chapterProgress,
-                    currentPageContent = content,
+                    currentChapter = currentChapter,
                     readerConfig = config,
                     bookmarks = bookmarks,
-                    isCurrentPageBookmarked = isBookmarked
+                    fullChapterText = content
                 )
             }
+
+            paginateCurrentChapter(
+                chapterIndex = currentChapter?.index ?: 0,
+                targetPageIndex = targetPageIndex
+            )
         } catch (e: Exception) {
             _uiState.update {
                 it.copy(
@@ -151,7 +143,6 @@ open class ReaderViewModel(
             val nextVisible = !state.isControlsVisible
             state.copy(
                 isControlsVisible = nextVisible,
-                // 若收起控制栏，一并收起子弹窗与抽屉
                 isTypographySheetVisible = if (!nextVisible) false else state.isTypographySheetVisible,
                 isDrawerOpen = if (!nextVisible) false else state.isDrawerOpen
             )
@@ -173,17 +164,11 @@ open class ReaderViewModel(
         if (state.currentPageIndex > 0) {
             // 当前章节内上一页
             val newPageIndex = state.currentPageIndex - 1
-            updatePageState(state.currentChapter?.index ?: 0, newPageIndex)
+            updatePageIndex(newPageIndex)
         } else if (state.hasPrevChapter) {
             // 翻入上一章节末页
             val prevChapterIndex = (state.currentChapter?.index ?: 1) - 1
-            val prevChapter = state.chapters.getOrNull(prevChapterIndex)
-            if (prevChapter != null) {
-                val prevContent = dataSource.getChapterContent(prevChapter.bookId, prevChapter.index)
-                val totalPages = calculatePagesForChapter(prevContent)
-                val lastPageIndex = (totalPages - 1).coerceAtLeast(0)
-                updateChapterAndPageState(prevChapter, prevContent, lastPageIndex, totalPages)
-            }
+            loadChapterAndSeek(prevChapterIndex, seekToLastPage = true)
         }
     }
 
@@ -192,30 +177,25 @@ open class ReaderViewModel(
         if (state.currentPageIndex < state.totalPagesInChapter - 1) {
             // 当前章节内下一页
             val newPageIndex = state.currentPageIndex + 1
-            updatePageState(state.currentChapter?.index ?: 0, newPageIndex)
+            updatePageIndex(newPageIndex)
         } else if (state.hasNextChapter) {
             // 翻入下一章节首页
             val nextChapterIndex = (state.currentChapter?.index ?: 0) + 1
-            val nextChapter = state.chapters.getOrNull(nextChapterIndex)
-            if (nextChapter != null) {
-                val nextContent = dataSource.getChapterContent(nextChapter.bookId, nextChapter.index)
-                val totalPages = calculatePagesForChapter(nextContent)
-                updateChapterAndPageState(nextChapter, nextContent, 0, totalPages)
-            }
+            loadChapterAndSeek(nextChapterIndex, seekToLastPage = false)
         }
     }
 
     private suspend fun handleJumpToPage(pageIndex: Int) {
         val state = _uiState.value
         val clamped = pageIndex.coerceIn(0, (state.totalPagesInChapter - 1).coerceAtLeast(0))
-        updatePageState(state.currentChapter?.index ?: 0, clamped)
+        updatePageIndex(clamped)
     }
 
     private suspend fun handlePrevChapter() {
         val state = _uiState.value
         if (state.hasPrevChapter) {
             val prevIdx = (state.currentChapter?.index ?: 1) - 1
-            handleJumpToChapter(prevIdx)
+            loadChapterAndSeek(prevIdx, seekToLastPage = false)
         }
     }
 
@@ -223,18 +203,36 @@ open class ReaderViewModel(
         val state = _uiState.value
         if (state.hasNextChapter) {
             val nextIdx = (state.currentChapter?.index ?: 0) + 1
-            handleJumpToChapter(nextIdx)
+            loadChapterAndSeek(nextIdx, seekToLastPage = false)
         }
     }
 
     private suspend fun handleJumpToChapter(chapterIndex: Int) {
-        val state = _uiState.value
-        val targetChapter = state.chapters.getOrNull(chapterIndex) ?: return
-        val content = dataSource.getChapterContent(targetChapter.bookId, targetChapter.index)
-        val totalPages = calculatePagesForChapter(content)
-        updateChapterAndPageState(targetChapter, content, 0, totalPages)
-        // 跳转章节后关闭抽屉
+        loadChapterAndSeek(chapterIndex, seekToLastPage = false)
         _uiState.update { it.copy(isDrawerOpen = false) }
+    }
+
+    private suspend fun loadChapterAndSeek(chapterIndex: Int, seekToLastPage: Boolean) {
+        val state = _uiState.value
+        val targetChapter = state.chapters.find { it.index == chapterIndex }
+            ?: state.chapters.getOrNull(chapterIndex)
+            ?: return
+
+        val bookId = targetChapter.bookId
+        val content = dataSource.getChapterContent(bookId, targetChapter.index)
+        currentChapterText = content
+
+        _uiState.update {
+            it.copy(
+                currentChapter = targetChapter,
+                fullChapterText = content
+            )
+        }
+
+        paginateCurrentChapter(
+            chapterIndex = targetChapter.index,
+            targetPageIndex = if (seekToLastPage) Int.MAX_VALUE else 0
+        )
     }
 
     private suspend fun handleSeekToProgress(progress: Float) {
@@ -243,26 +241,13 @@ open class ReaderViewModel(
         val clamped = progress.coerceIn(0.0f, 1.0f)
         val targetChapterIdx = ((clamped * state.chapters.size).toInt())
             .coerceIn(0, state.chapters.size - 1)
-        val targetChapter = state.chapters[targetChapterIdx]
-        val content = dataSource.getChapterContent(targetChapter.bookId, targetChapter.index)
-        val totalPages = calculatePagesForChapter(content)
-
-        // 估算本章内偏移页
-        val chapterProgressWeight = 1.0f / state.chapters.size
-        val chapterStartProgress = targetChapterIdx * chapterProgressWeight
-        val progressInChapter = if (chapterProgressWeight > 0f) {
-            ((clamped - chapterStartProgress) / chapterProgressWeight).coerceIn(0.0f, 1.0f)
-        } else 0.0f
-        val targetPage = (progressInChapter * totalPages).toInt().coerceIn(0, (totalPages - 1).coerceAtLeast(0))
-
-        updateChapterAndPageState(targetChapter, content, targetPage, totalPages)
+        loadChapterAndSeek(targetChapterIdx, seekToLastPage = false)
     }
 
     private fun handleSetDrawerOpen(isOpen: Boolean) {
         _uiState.update { state ->
             state.copy(
                 isDrawerOpen = isOpen,
-                // 打开抽屉时收起控制栏，保持纯净阅读体验
                 isControlsVisible = if (isOpen) false else state.isControlsVisible
             )
         }
@@ -295,34 +280,37 @@ open class ReaderViewModel(
             ReaderConfig.MAX_FONT_SIZE_SP
         )
         updateReaderConfig { it.copy(fontSizeSp = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSetLineHeight(multiplier: Float) {
-        val clamped = multiplier.coerceIn(
-            ReaderConfig.MIN_LINE_HEIGHT,
-            ReaderConfig.MAX_LINE_HEIGHT
-        )
+        val clamped = multiplier.coerceIn(1.0f, 3.0f)
         updateReaderConfig { it.copy(lineHeightMultiplier = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSetLetterSpacing(letterSpacingEm: Float) {
-        val clamped = letterSpacingEm.coerceIn(0.0f, 0.5f)
+        val clamped = letterSpacingEm.coerceIn(-0.05f, 0.5f)
         updateReaderConfig { it.copy(letterSpacingEm = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSetParagraphSpacing(spacingDp: Float) {
-        val clamped = spacingDp.coerceIn(0.0f, ReaderConfig.MAX_PARAGRAPH_SPACING_DP)
+        val clamped = spacingDp.coerceIn(0f, 48f)
         updateReaderConfig { it.copy(paragraphSpacingDp = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSetHorizontalPadding(paddingDp: Float) {
-        val clamped = paddingDp.coerceIn(8.0f, 48.0f)
+        val clamped = paddingDp.coerceIn(8f, 48f)
         updateReaderConfig { it.copy(pagePaddingHorizontalDp = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSetVerticalPadding(paddingDp: Float) {
-        val clamped = paddingDp.coerceIn(12.0f, 64.0f)
+        val clamped = paddingDp.coerceIn(8f, 64f)
         updateReaderConfig { it.copy(pagePaddingVerticalDp = clamped) }
+        repaginateAndMaintainOffset()
     }
 
     private suspend fun handleSelectThemePreset(preset: ReaderThemePreset) {
@@ -344,16 +332,15 @@ open class ReaderViewModel(
     private suspend fun handleToggleBookmark() {
         val state = _uiState.value
         val bookId = state.book?.id ?: 1L
-        val chapterIdx = state.currentChapter?.index ?: 0
-        val chapterTitle = state.currentChapter?.title ?: "未知章节"
-        val pageIdx = state.currentPageIndex
+        val chapter = state.currentChapter ?: return
 
-        val existing = state.bookmarks.firstOrNull {
-            it.chapterIndex == chapterIdx && (it.charOffset / 200) == pageIdx
+        val existing = state.bookmarks.find {
+            it.chapterIndex == chapter.index &&
+                    ((state.currentPageIndex == 0 && it.charOffset == 0) ||
+                            (state.currentLocator != null && it.charOffset == state.currentLocator.charOffset))
         }
 
         if (existing != null) {
-            // 已存在 -> 删除书签
             dataSource.deleteBookmark(existing.id)
             val updated = state.bookmarks.filterNot { it.id == existing.id }
             _uiState.update {
@@ -363,24 +350,19 @@ open class ReaderViewModel(
                 )
             }
         } else {
-            // 不存在 -> 新建书签
-            val previewSnippet = state.currentPageContent.take(60).trim().ifBlank {
-                "书签记录于第 ${pageIdx + 1} 页"
-            }
+            val snippet = state.currentPageContent.take(60).replace("\n", " ")
             val newBookmark = Bookmark(
-                id = 0L,
                 bookId = bookId,
-                chapterIndex = chapterIdx,
-                chapterTitle = chapterTitle,
-                charOffset = pageIdx * 200,
-                previewText = previewSnippet,
+                chapterIndex = chapter.index,
+                chapterTitle = chapter.title,
+                charOffset = state.currentLocator?.charOffset ?: 0,
+                previewText = snippet.ifBlank { "第 ${state.currentPageIndex + 1} 页标记" },
                 createTime = System.currentTimeMillis()
             )
             val saved = dataSource.saveBookmark(newBookmark)
-            val updated = listOf(saved) + state.bookmarks
             _uiState.update {
                 it.copy(
-                    bookmarks = updated,
+                    bookmarks = listOf(saved) + it.bookmarks,
                     isCurrentPageBookmarked = true
                 )
             }
@@ -389,122 +371,142 @@ open class ReaderViewModel(
 
     private suspend fun handleDeleteBookmark(bookmarkId: Long) {
         dataSource.deleteBookmark(bookmarkId)
-        val state = _uiState.value
-        val updated = state.bookmarks.filterNot { it.id == bookmarkId }
-        val isBookmarked = checkIsBookmarked(
-            bookmarks = updated,
-            chapterIndex = state.currentChapter?.index ?: 0,
-            pageIndex = state.currentPageIndex
-        )
-        _uiState.update {
-            it.copy(
-                bookmarks = updated,
-                isCurrentPageBookmarked = isBookmarked
-            )
+        _uiState.update { state ->
+            val updated = state.bookmarks.filterNot { it.id == bookmarkId }
+            val isCurrentMarked = state.currentChapter?.let { ch ->
+                checkIsBookmarked(updated, ch.index, state.currentPageIndex)
+            } ?: false
+            state.copy(bookmarks = updated, isCurrentPageBookmarked = isCurrentMarked)
         }
     }
 
     private suspend fun handleJumpToBookmark(bookmark: Bookmark) {
-        val state = _uiState.value
-        val targetChapter = state.chapters.getOrNull(bookmark.chapterIndex) ?: return
-        val content = dataSource.getChapterContent(targetChapter.bookId, targetChapter.index)
-        val totalPages = calculatePagesForChapter(content)
-        val pageIdx = (bookmark.charOffset / 200).coerceIn(0, (totalPages - 1).coerceAtLeast(0))
-
-        updateChapterAndPageState(targetChapter, content, pageIdx, totalPages)
+        loadChapterAndSeek(bookmark.chapterIndex, seekToLastPage = false)
+        val targetPage = ReadLocatorMapper.locatePageByCharOffset(currentPages, bookmark.charOffset)
+        updatePageIndex(targetPage)
         _uiState.update { it.copy(isDrawerOpen = false) }
+    }
+
+    private fun handleUpdateViewport(width: Float, height: Float) {
+        if (width <= 50f || height <= 50f) return
+        val config = _uiState.value.readerConfig
+        currentDimensions = PageDimensions(
+            viewWidth = width,
+            viewHeight = height,
+            paddingLeft = config.pagePaddingHorizontalDp * 2.5f,
+            paddingRight = config.pagePaddingHorizontalDp * 2.5f,
+            paddingTop = config.pagePaddingVerticalDp * 2.5f,
+            paddingBottom = config.pagePaddingVerticalDp * 2.5f
+        )
+        repaginateAndMaintainOffset()
     }
 
     private fun handleClearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }
 
-    // --- 内部状态辅助计算与持久化同步 ---
+    // ==================== 核心分页与状态派生 ====================
 
-    private suspend fun updatePageState(chapterIndex: Int, pageIndex: Int) {
-        val state = _uiState.value
-        val totalProgress = calculateTotalProgress(
-            chapterIndex = chapterIndex,
-            totalChapters = state.chapters.size,
-            pageIndex = pageIndex,
-            totalPagesInChapter = state.totalPagesInChapter
-        )
-        val chapterProgress = calculateChapterProgress(pageIndex, state.totalPagesInChapter)
-        val isBookmarked = checkIsBookmarked(state.bookmarks, chapterIndex, pageIndex)
+    private fun paginateCurrentChapter(chapterIndex: Int, targetPageIndex: Int) {
+        val config = _uiState.value.readerConfig
+        val measurer = StandardCharMeasurer(fontSize = config.fontSizeSp)
+        val measureEngine = TextMeasureEngine(measurer = measurer, config = config)
+        val splitter = PageSplitter(measureEngine)
 
-        val locator = ReadLocator(
-            bookId = state.book?.id ?: 1L,
-            chapterIndex = chapterIndex,
-            chapterTitle = state.currentChapter?.title ?: "",
-            charOffset = pageIndex * 200,
-            progression = totalProgress,
-            pageIndexInChapter = pageIndex,
-            totalPagesInChapter = state.totalPagesInChapter
-        )
-        dataSource.saveLocator(locator)
-
-        _uiState.update {
-            it.copy(
-                currentPageIndex = pageIndex,
-                totalProgress = totalProgress,
-                chapterProgress = chapterProgress,
-                currentLocator = locator,
-                isCurrentPageBookmarked = isBookmarked
-            )
+        currentPages = if (currentChapterText.isNotBlank()) {
+            splitter.splitChapter(currentChapterText, currentDimensions, chapterIndex)
+        } else {
+            emptyList()
         }
+
+        val totalPages = currentPages.size.coerceAtLeast(1)
+        val pageIndex = targetPageIndex.coerceIn(0, totalPages - 1)
+        applyPage(pageIndex, totalPages)
     }
 
-    private suspend fun updateChapterAndPageState(
-        chapter: Chapter,
-        content: String,
-        pageIndex: Int,
-        totalPages: Int
-    ) {
+    private fun repaginateAndMaintainOffset() {
+        val currentOffset = _uiState.value.currentLocator?.charOffset ?: 0
+        val chapterIdx = _uiState.value.currentChapter?.index ?: 0
+
+        val config = _uiState.value.readerConfig
+        val measurer = StandardCharMeasurer(fontSize = config.fontSizeSp)
+        val measureEngine = TextMeasureEngine(measurer = measurer, config = config)
+        val splitter = PageSplitter(measureEngine)
+
+        currentPages = if (currentChapterText.isNotBlank()) {
+            splitter.splitChapter(currentChapterText, currentDimensions, chapterIdx)
+        } else {
+            emptyList()
+        }
+
+        val totalPages = currentPages.size.coerceAtLeast(1)
+        val newPageIndex = if (currentPages.isNotEmpty()) {
+            ReadLocatorMapper.locatePageByCharOffset(currentPages, currentOffset)
+        } else {
+            0
+        }
+        applyPage(newPageIndex, totalPages)
+    }
+
+    private fun applyPage(pageIndex: Int, totalPages: Int) {
         val state = _uiState.value
+        val chapter = state.currentChapter
+        val page = currentPages.getOrNull(pageIndex)
+
+        val pageLines = page?.lines?.map { it.text } ?: emptyList()
+        val pageContent = if (pageLines.isNotEmpty()) {
+            pageLines.joinToString("\n")
+        } else {
+            currentChapterText
+        }
+
         val totalProgress = calculateTotalProgress(
-            chapterIndex = chapter.index,
+            chapterIndex = chapter?.index ?: 0,
             totalChapters = state.chapters.size,
             pageIndex = pageIndex,
             totalPagesInChapter = totalPages
         )
         val chapterProgress = calculateChapterProgress(pageIndex, totalPages)
-        val isBookmarked = checkIsBookmarked(state.bookmarks, chapter.index, pageIndex)
+        val isBookmarked = checkIsBookmarked(state.bookmarks, chapter?.index ?: 0, pageIndex)
 
         val locator = ReadLocator(
-            bookId = chapter.bookId,
-            chapterIndex = chapter.index,
-            chapterTitle = chapter.title,
-            charOffset = pageIndex * 200,
+            bookId = chapter?.bookId ?: state.book?.id ?: 1L,
+            chapterIndex = chapter?.index ?: 0,
+            chapterTitle = chapter?.title ?: "正文",
+            charOffset = page?.startCharOffset ?: (pageIndex * 200),
             progression = totalProgress,
             pageIndexInChapter = pageIndex,
             totalPagesInChapter = totalPages
         )
-        dataSource.saveLocator(locator)
+
+        viewModelScope.launch {
+            dataSource.saveLocator(locator)
+        }
 
         _uiState.update {
             it.copy(
-                currentChapter = chapter,
-                currentPageContent = content,
                 currentPageIndex = pageIndex,
                 totalPagesInChapter = totalPages,
+                currentPageContent = pageContent,
+                currentPaginatedLines = pageLines,
                 totalProgress = totalProgress,
                 chapterProgress = chapterProgress,
                 currentLocator = locator,
-                isCurrentPageBookmarked = isBookmarked
+                isCurrentPageBookmarked = isBookmarked,
+                isLoading = false
             )
         }
+    }
+
+    private fun updatePageIndex(pageIndex: Int) {
+        val totalPages = _uiState.value.totalPagesInChapter
+        applyPage(pageIndex.coerceIn(0, totalPages - 1), totalPages)
     }
 
     private suspend fun updateReaderConfig(updater: (ReaderConfig) -> ReaderConfig) {
         val newConfig = updater(_uiState.value.readerConfig)
         dataSource.saveReaderConfig(newConfig)
         _uiState.update { it.copy(readerConfig = newConfig) }
-    }
-
-    private fun calculatePagesForChapter(content: String): Int {
-        // 估算分页：每页约 350 字
-        val length = content.length
-        return (length / 350 + 1).coerceAtLeast(1)
     }
 
     private fun calculateTotalProgress(
@@ -517,22 +519,45 @@ open class ReaderViewModel(
         val chapterProgressFraction = if (totalPagesInChapter > 1) {
             pageIndex.toFloat() / (totalPagesInChapter - 1)
         } else 0.0f
-        val weighted = (chapterIndex + chapterProgressFraction) / totalChapters.toFloat()
-        return weighted.coerceIn(0.0f, 1.0f)
+
+        val rawProgress = (chapterIndex.toFloat() + chapterProgressFraction) / totalChapters.toFloat()
+        return rawProgress.coerceIn(0.0f, 1.0f)
     }
 
-    private fun calculateChapterProgress(pageIndex: Int, totalPages: Int): Float {
-        if (totalPages <= 1) return 1.0f
-        return (pageIndex.toFloat() / (totalPages - 1)).coerceIn(0.0f, 1.0f)
+    private fun calculateChapterProgress(pageIndex: Int, totalPagesInChapter: Int): Float {
+        if (totalPagesInChapter <= 1) return 1.0f
+        return (pageIndex.toFloat() / (totalPagesInChapter - 1).toFloat()).coerceIn(0.0f, 1.0f)
     }
 
-    private fun checkIsBookmarked(
-        bookmarks: List<Bookmark>,
-        chapterIndex: Int,
-        pageIndex: Int
-    ): Boolean {
+    private fun checkIsBookmarked(bookmarks: List<Bookmark>, chapterIndex: Int, pageIndex: Int): Boolean {
         return bookmarks.any {
-            it.chapterIndex == chapterIndex && (it.charOffset / 200) == pageIndex
+            it.chapterIndex == chapterIndex &&
+                    ((pageIndex == 0 && it.charOffset == 0) ||
+                            (_uiState.value.currentLocator != null && it.charOffset == _uiState.value.currentLocator?.charOffset))
+        }
+    }
+
+    companion object {
+        var defaultDataSourceProvider: ((Long) -> ReaderDataSource)? = null
+
+        fun createDefaultDataSource(bookId: Long): ReaderDataSource {
+            defaultDataSourceProvider?.let { return it(bookId) }
+            return try {
+                val appClass = Class.forName("com.reader.app.ReaderApplication")
+                val instanceProp = appClass.getMethod("getInstance").invoke(null)
+                val db = appClass.getMethod("getDatabase").invoke(instanceProp) as com.reader.core.database.ReaderDatabase
+                val prefs = appClass.getMethod("getPreferencesDataStore").invoke(instanceProp) as com.reader.core.datastore.ReaderPreferencesDataStore
+                RoomReaderDataSource(database = db, preferencesDataStore = prefs)
+            } catch (_: Throwable) {
+                InMemoryReaderDataSource()
+            }
+        }
+
+        fun create(bookId: Long): ReaderViewModel {
+            return ReaderViewModel(
+                dataSource = createDefaultDataSource(bookId),
+                defaultBookId = bookId
+            )
         }
     }
 }

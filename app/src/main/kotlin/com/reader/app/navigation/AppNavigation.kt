@@ -56,6 +56,7 @@ fun AppNavigation(
 
             is AppRoute.Reader -> {
                 ReaderScreen(
+                    bookId = route.bookId,
                     onBackClick = {
                         currentRoute = AppRoute.Bookshelf
                     }

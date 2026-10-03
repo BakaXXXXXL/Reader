@@ -1,22 +1,25 @@
 package com.reader.feature.reader
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
@@ -33,23 +36,20 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.reader.core.designsystem.component.ReaderErrorStateView
 import com.reader.core.designsystem.component.ReaderLoadingIndicator
 import com.reader.core.designsystem.theme.ReaderTheme
@@ -63,6 +63,7 @@ import com.reader.feature.reader.component.ReaderBottomBar
 import com.reader.feature.reader.component.ReaderTopBar
 import com.reader.feature.reader.component.TypographySettingBottomSheet
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * 转换阅读配置预设至 DesignSystem 统一主题类型
@@ -80,15 +81,18 @@ fun ReaderThemePreset.toReadingThemeType(): ReadingThemeType {
 /**
  * 阅读器沉浸全屏交互主屏幕 (ReaderScreen - Stateful Entry).
  *
+ * @param bookId 当前阅读书籍的主键 ID
  * @param onBackClick 返回书架或上一级页面导航回调
- * @param viewModel 阅读器 MVI 状态机 ViewModel
  */
 @Composable
 fun ReaderScreen(
+    bookId: Long = 1L,
     onBackClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    viewModel: ReaderViewModel = viewModel()
+    modifier: Modifier = Modifier
 ) {
+    val viewModel = remember(bookId) {
+        ReaderViewModel.create(bookId)
+    }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     ReaderScreenContent(
@@ -100,16 +104,7 @@ fun ReaderScreen(
 }
 
 /**
- * 阅读器沉浸式无状态展示组件 (ReaderScreenContent - Stateless).
- *
- * 聚合了：
- * 1. Android 15 Edge-to-Edge 沉浸全屏控制 (状态栏/导航栏随控制栏可见性动态显示/沉浸)；
- * 2. 屏幕常亮保持控制 [KeepScreenOnEffect]；
- * 3. 屏幕中心点击唤起/收起控制栏，两侧点击或水平滑动触控翻页；
- * 4. 浮层沉浸式顶部栏 [ReaderTopBar]；
- * 5. 浮层沉浸式底部进度与快捷菜单栏 [ReaderBottomBar]；
- * 6. 侧边目录/书签抽屉 [ChapterDrawerContent]；
- * 7. 底部排版设置弹窗 [TypographySettingBottomSheet]。
+ * 阅读器沉浸式展示组件 (ReaderScreenContent - Stateless).
  */
 @Composable
 fun ReaderScreenContent(
@@ -129,7 +124,7 @@ fun ReaderScreenContent(
     // 屏幕常亮跟随配置开关
     KeepScreenOnEffect(enabled = uiState.readerConfig.keepScreenOn)
 
-    // 沉浸模式同步：控制栏可见时展示系统状态栏与导航栏；沉浸阅读时完全隐藏进入全屏沉浸
+    // 沉浸模式同步
     LaunchedEffect(uiState.isControlsVisible) {
         systemBarController.setImmersiveMode(!uiState.isControlsVisible)
     }
@@ -143,14 +138,13 @@ fun ReaderScreenContent(
         }
     }
 
-    LaunchedEffect(drawerState.currentValue) {
-        val isOpen = drawerState.isOpen
-        if (isOpen != uiState.isDrawerOpen) {
-            onIntent(ReaderIntent.SetDrawerOpen(isOpen))
+    LaunchedEffect(drawerState.isOpen) {
+        if (!drawerState.isOpen && uiState.isDrawerOpen) {
+            onIntent(ReaderIntent.SetDrawerOpen(false))
         }
     }
 
-    // 错误信息提示
+    // 错误状态 Snackbar 提示
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { msg ->
             snackbarHostState.showSnackbar(msg)
@@ -163,6 +157,7 @@ fun ReaderScreenContent(
 
         ModalNavigationDrawer(
             drawerState = drawerState,
+            gesturesEnabled = !uiState.isControlsVisible,
             drawerContent = {
                 ChapterDrawerContent(
                     bookTitle = uiState.bookTitleDisplay,
@@ -172,26 +167,31 @@ fun ReaderScreenContent(
                     isReversed = uiState.isChaptersReversed,
                     selectedTab = uiState.selectedDrawerTab,
                     bookmarks = uiState.bookmarks,
-                    onTabSelected = { onIntent(ReaderIntent.SwitchDrawerTab(it)) },
-                    onToggleOrderClick = { onIntent(ReaderIntent.ToggleChapterOrder) },
+                    onTabSelected = { tab ->
+                        onIntent(ReaderIntent.SwitchDrawerTab(tab))
+                    },
+                    onToggleOrderClick = {
+                        onIntent(ReaderIntent.ToggleChapterOrder)
+                    },
                     onChapterClick = { chapter ->
-                        onIntent(ReaderIntent.JumpToChapter(chapter.index))
                         scope.launch { drawerState.close() }
+                        onIntent(ReaderIntent.JumpToChapter(chapter.index))
                     },
                     onBookmarkClick = { bookmark ->
-                        onIntent(ReaderIntent.JumpToBookmark(bookmark))
                         scope.launch { drawerState.close() }
+                        onIntent(ReaderIntent.JumpToBookmark(bookmark))
                     },
-                    onDeleteBookmarkClick = { onIntent(ReaderIntent.DeleteBookmark(it)) }
+                    onDeleteBookmarkClick = { bookmarkId ->
+                        onIntent(ReaderIntent.DeleteBookmark(bookmarkId))
+                    }
                 )
             },
-            gesturesEnabled = !uiState.isControlsVisible,
             modifier = modifier.fillMaxSize()
         ) {
             Scaffold(
+                modifier = Modifier.fillMaxSize(),
                 snackbarHost = { SnackbarHost(snackbarHostState) },
-                containerColor = palette.canvasBackground,
-                contentColor = palette.textColor
+                containerColor = palette.canvasBackground
             ) { scaffoldPadding ->
                 Box(
                     modifier = Modifier
@@ -214,9 +214,10 @@ fun ReaderScreenContent(
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        // 1. 核心正文阅读渲染页面 (响应三区触控与滑动手势)
+                        // 1. 核心正文阅读渲染页面 (响应三区触控与滑动手势，实时排版)
                         ReaderPageCanvas(
                             uiState = uiState,
+                            onIntent = onIntent,
                             onCenterTap = { onIntent(ReaderIntent.ToggleControls) },
                             onPrevPage = { onIntent(ReaderIntent.PrevPage) },
                             onNextPage = { onIntent(ReaderIntent.NextPage) },
@@ -244,9 +245,7 @@ fun ReaderScreenContent(
                             pageIndicatorText = uiState.pageIndicatorText,
                             hasPrevChapter = uiState.hasPrevChapter,
                             hasNextChapter = uiState.hasNextChapter,
-                            onProgressChange = { progress ->
-                                // 拖拽中可选提供触感反馈
-                            },
+                            onProgressChange = { _ -> },
                             onProgressChangeFinished = { progress ->
                                 onIntent(ReaderIntent.SeekToProgress(progress))
                             },
@@ -297,18 +296,18 @@ fun ReaderScreenContent(
 /**
  * 核心正文阅读展示容器。
  *
- * 实现了沉浸式手势与触控分区逻辑：
+ * 实现了无冲突单触控流手势检测：
  * - 屏幕左侧 25% 区域点击：上一页；
  * - 屏幕右侧 25% 区域点击：下一页；
  * - 屏幕中央 50% 区域点击：唤醒或隐藏沉浸控制栏；
  * - 水平左右滑动手势检测：左滑翻入下一页，右滑翻入上一页。
  *
- * 同时严格基于 [ReaderConfig] 进行实时排版呈现：
- * 字号、行高倍率、段落间距、字间距、内边距与页眉页脚。
+ * 结合 [ReaderConfig] 进行高精度自适应排版呈现，支持 Cover 覆盖动画与垂直无缝滚动。
  */
 @Composable
 private fun ReaderPageCanvas(
     uiState: ReaderUiState,
+    onIntent: (ReaderIntent) -> Unit,
     onCenterTap: () -> Unit,
     onPrevPage: () -> Unit,
     onNextPage: () -> Unit,
@@ -316,54 +315,62 @@ private fun ReaderPageCanvas(
 ) {
     val palette = ReaderTheme.readingPalette
     val config = uiState.readerConfig
+    val density = LocalDensity.current
 
     val topSafeInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottomSafeInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-    var dragAmountTotal by remember { mutableFloatStateOf(0f) }
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(palette.canvasBackground)
-            .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    val screenWidth = size.width
-                    val leftThreshold = screenWidth * 0.25f
-                    val rightThreshold = screenWidth * 0.75f
+            .pointerInput(config.pageTurnAnimation) {
+                val screenWidth = size.width.toFloat()
+                val leftThreshold = screenWidth * 0.25f
+                val rightThreshold = screenWidth * 0.75f
 
-                    when {
-                        offset.x < leftThreshold -> {
-                            onPrevPage()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var totalDragX = 0f
+                    var isDrag = false
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: break
+                        if (change.pressed) {
+                            val dx = change.position.x - change.previousPosition.x
+                            totalDragX += dx
+                            if (abs(totalDragX) > 20f && config.pageTurnAnimation != PageTurnAnimation.CONTINUOUS_SCROLL) {
+                                isDrag = true
+                                change.consume()
+                            }
                         }
-                        offset.x > rightThreshold -> {
-                            onNextPage()
-                        }
-                        else -> {
-                            onCenterTap()
+                    } while (event.changes.any { it.pressed })
+
+                    if (isDrag) {
+                        if (totalDragX < -40f) onNextPage()
+                        else if (totalDragX > 40f) onPrevPage()
+                    } else {
+                        val tapX = down.position.x
+                        when {
+                            tapX < leftThreshold -> onPrevPage()
+                            tapX > rightThreshold -> onNextPage()
+                            else -> onCenterTap()
                         }
                     }
                 }
             }
-            .pointerInput(config.pageTurnAnimation) {
-                // 如果不是垂直滚动模式，捕获水平滑动翻页
-                if (config.pageTurnAnimation != PageTurnAnimation.CONTINUOUS_SCROLL) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { dragAmountTotal = 0f },
-                        onDragEnd = {
-                            if (dragAmountTotal > 60f) {
-                                onPrevPage()
-                            } else if (dragAmountTotal < -60f) {
-                                onNextPage()
-                            }
-                        },
-                        onHorizontalDrag = { _, dragAmount ->
-                            dragAmountTotal += dragAmount
-                        }
-                    )
-                }
-            }
     ) {
+        val widthPx = with(density) { maxWidth.toPx() }
+        val heightPx = with(density) { maxHeight.toPx() }
+
+        // 根据真实屏幕视口尺寸驱动排版引擎
+        LaunchedEffect(widthPx, heightPx) {
+            if (widthPx > 100f && heightPx > 100f) {
+                onIntent(ReaderIntent.UpdateViewport(widthPx, heightPx))
+            }
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -393,33 +400,23 @@ private fun ReaderPageCanvas(
             }
 
             // 正文内容区域
-            val scrollState = rememberScrollState()
-            val textContentModifier = if (config.pageTurnAnimation == PageTurnAnimation.CONTINUOUS_SCROLL) {
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .verticalScroll(scrollState)
-            } else {
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            }
+            val textContentModifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
 
-            Box(
-                modifier = textContentModifier,
-                contentAlignment = Alignment.TopStart
-            ) {
-                val paragraphs = remember(uiState.currentPageContent) {
-                    uiState.currentPageContent.split("\n").filter { it.isNotBlank() }
-                }
-
+            if (config.pageTurnAnimation == PageTurnAnimation.CONTINUOUS_SCROLL) {
+                // 垂直滚动模式
+                val scrollState = rememberScrollState()
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = textContentModifier.verticalScroll(scrollState),
                     verticalArrangement = Arrangement.spacedBy(config.paragraphSpacingDp.dp)
                 ) {
+                    val paragraphs = remember(uiState.fullChapterText) {
+                        uiState.fullChapterText.split("\n").filter { it.isNotBlank() }
+                    }
                     paragraphs.forEach { para ->
                         Text(
-                            text = para,
+                            text = if (config.firstLineIndentSpaces > 0) "　　${para.trimStart()}" else para,
                             style = TextStyle(
                                 fontSize = config.fontSizeSp.sp,
                                 lineHeight = (config.fontSizeSp * config.lineHeightMultiplier).sp,
@@ -430,6 +427,71 @@ private fun ReaderPageCanvas(
                             ),
                             modifier = Modifier.fillMaxWidth()
                         )
+                    }
+                }
+            } else {
+                // 翻页模式：带有 Cover 覆盖动画的物理页面渲染
+                AnimatedContent(
+                    targetState = uiState.currentPageIndex to (uiState.currentChapter?.index ?: 0),
+                    transitionSpec = {
+                        val isForward = if (targetState.second != initialState.second) {
+                            targetState.second > initialState.second
+                        } else {
+                            targetState.first >= initialState.first
+                        }
+
+                        if (config.pageTurnAnimation == PageTurnAnimation.NONE) {
+                            EnterTransition.None togetherWith ExitTransition.None
+                        } else if (isForward) {
+                            (slideInHorizontally { width -> width } + fadeIn()).togetherWith(
+                                slideOutHorizontally { width -> -width / 3 } + fadeOut()
+                            )
+                        } else {
+                            (slideInHorizontally { width -> -width / 3 } + fadeIn()).togetherWith(
+                                slideOutHorizontally { width -> width } + fadeOut()
+                            )
+                        }
+                    },
+                    label = "PageContentTransition",
+                    modifier = textContentModifier
+                ) { _ ->
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(config.paragraphSpacingDp.dp)
+                    ) {
+                        val lines = uiState.currentPaginatedLines
+                        if (lines.isNotEmpty()) {
+                            lines.forEach { line ->
+                                Text(
+                                    text = line,
+                                    style = TextStyle(
+                                        fontSize = config.fontSizeSp.sp,
+                                        lineHeight = (config.fontSizeSp * config.lineHeightMultiplier).sp,
+                                        letterSpacing = config.letterSpacingEm.em,
+                                        color = palette.textColor,
+                                        textAlign = TextAlign.Justify,
+                                        fontFamily = FontFamily.Default
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        } else {
+                            val pageParas = uiState.currentPageContent.split("\n").filter { it.isNotBlank() }
+                            pageParas.forEach { para ->
+                                Text(
+                                    text = para,
+                                    style = TextStyle(
+                                        fontSize = config.fontSizeSp.sp,
+                                        lineHeight = (config.fontSizeSp * config.lineHeightMultiplier).sp,
+                                        letterSpacing = config.letterSpacingEm.em,
+                                        color = palette.textColor,
+                                        textAlign = TextAlign.Justify,
+                                        fontFamily = FontFamily.Default
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
             }

@@ -56,6 +56,8 @@ data class ReaderUiState(
     val totalProgress: Float = 0.0f,
     val chapterProgress: Float = 0.0f,
     val currentPageContent: String = "",
+    val fullChapterText: String = "",
+    val currentPaginatedLines: List<String> = emptyList(),
     val readerConfig: ReaderConfig = ReaderConfig.DEFAULT,
     val isControlsVisible: Boolean = false,
     val isDrawerOpen: Boolean = false,
