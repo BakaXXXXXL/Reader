@@ -95,6 +95,7 @@ fun BookshelfScreen(
             if (candidates.isNotEmpty()) {
                 viewModel.onIntent(BookshelfIntent.AddCandidates(candidates))
                 viewModel.onIntent(BookshelfIntent.OpenImportDialog)
+                viewModel.onIntent(BookshelfIntent.StartImport)
             }
         }
     }

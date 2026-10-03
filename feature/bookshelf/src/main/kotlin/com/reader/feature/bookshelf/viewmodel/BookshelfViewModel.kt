@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
  * 遵循 MVI 架构单向数据流契约，管理书籍列表流、分类过滤、排序、搜索、批量操作及本地导入。
  */
 open class BookshelfViewModel(
-    private val repository: BookshelfRepository = DefaultBookshelfRepository()
+    private val repository: BookshelfRepository = createDefaultRepository()
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(BookshelfUiState(isLoading = true))
@@ -587,4 +587,25 @@ open class BookshelfViewModel(
         val filteredBooks: List<BookshelfItem>,
         val counts: Map<BookshelfCategory, Int>
     )
+
+    companion object {
+        var defaultRepositoryProvider: (() -> BookshelfRepository)? = null
+
+        fun createDefaultRepository(): BookshelfRepository {
+            defaultRepositoryProvider?.let { return it() }
+            return try {
+                val appClass = Class.forName("com.reader.app.ReaderApplication")
+                val instanceMethod = appClass.getMethod("getInstance")
+                val appInstance = instanceMethod.invoke(null)
+                val dbMethod = appClass.getMethod("getDatabase")
+                val db = dbMethod.invoke(appInstance) as com.reader.core.database.ReaderDatabase
+                DefaultBookshelfRepository(
+                    database = db,
+                    context = appInstance as android.content.Context
+                )
+            } catch (_: Throwable) {
+                DefaultBookshelfRepository()
+            }
+        }
+    }
 }
